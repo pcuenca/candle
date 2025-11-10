@@ -1,0 +1,4 @@
+module CandleDepth [system] {
+  header "candle_depth_bridge.h"
+  export *
+}
