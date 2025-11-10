@@ -22,7 +22,7 @@ libc = "0.2"
 palette = { version = "0.7.6", features = ["named"] }
 
 [features]
-default = []
+default = ["metal"]
 metal = [
     "candle/metal",
     "candle-nn/metal",

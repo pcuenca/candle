@@ -25,7 +25,6 @@ typedef enum CandleDepthStatusCode {
 
 typedef struct CandleDepthInitOptions {
   const char *asset_dir;
-  uint8_t use_metal;
 } CandleDepthInitOptions;
 
 typedef struct CandleDepthImageView {

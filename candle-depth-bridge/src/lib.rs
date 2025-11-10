@@ -75,7 +75,6 @@ impl AssetLayout {
 #[repr(C)]
 pub struct CandleDepthInitOptions {
     pub asset_dir: *const c_char,
-    pub use_metal: u8,
 }
 
 #[repr(C)]
@@ -140,9 +139,7 @@ pub unsafe extern "C" fn candle_depth_init(
         Ok(path) => path,
         Err(code) => return code,
     };
-    let use_metal = options.use_metal != 0;
-
-    match initialise(&asset_dir, use_metal) {
+    match initialise(&asset_dir) {
         Ok(context) => {
             let _ = CONTEXT.set(Mutex::new(context));
             CandleDepthStatusCode::Ok
@@ -232,31 +229,16 @@ pub unsafe extern "C" fn candle_depth_last_error() -> *const c_char {
     })
 }
 
-fn initialise(asset_dir: &PathBuf, use_metal: bool) -> Result<DepthBridge, CandleDepthStatusCode> {
+#[cfg(feature = "metal")]
+fn initialise(asset_dir: &PathBuf) -> Result<DepthBridge, CandleDepthStatusCode> {
     let layout = AssetLayout::new(asset_dir.to_path_buf())?;
-    let device = if use_metal {
-        #[cfg(feature = "metal")]
-        {
-            match Device::new_metal(0) {
-                Ok(d) => d,
-                Err(e) => {
-                    return Err(set_error(
-                        CandleDepthStatusCode::MetalUnavailable,
-                        format!("failed to acquire Metal device: {e}"),
-                    ))
-                }
-            }
-        }
-        #[cfg(not(feature = "metal"))]
-        {
-            return Err(set_error(
-                CandleDepthStatusCode::MetalUnavailable,
-                "bridge compiled without Metal support",
-            ));
-        }
-    } else {
-        Device::Cpu
-    };
+
+    let device = Device::new_metal(0).map_err(|e| {
+        set_error(
+            CandleDepthStatusCode::MetalUnavailable,
+            format!("failed to acquire Metal device: {e}"),
+        )
+    })?;
 
     let dinov2_vb = unsafe {
         VarBuilder::from_mmaped_safetensors(&[layout.dinov2_weights.clone()], DType::F32, &device)
@@ -303,6 +285,15 @@ fn initialise(asset_dir: &PathBuf, use_metal: bool) -> Result<DepthBridge, Candl
         device,
         model: DepthModel(depth_anything),
     })
+}
+
+#[cfg(not(feature = "metal"))]
+fn initialise(asset_dir: &PathBuf) -> Result<DepthBridge, CandleDepthStatusCode> {
+    let _ = asset_dir;
+    Err(set_error(
+        CandleDepthStatusCode::MetalUnavailable,
+        "bridge compiled without Metal support",
+    ))
 }
 
 fn run_inference(

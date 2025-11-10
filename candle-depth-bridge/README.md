@@ -5,7 +5,8 @@ provide a C interface that can be used from Swift.
 
 ## Building
 
-Create an XCFramework (requires Xcode command-line tools):
+Create an XCFramework that targets the Metal device. It requires Xcode
+command-line tools.
 
 ```bash
 make -f candle-depth-bridge/Makefile
@@ -23,8 +24,8 @@ If any of the files is not found, initialization returns a
 
 ## C API
 
-- `candle_depth_init` initializes the bridge. Set `use_metal` to enable the Metal
-  backend (must compile with the `metal` feature). You probably want this.
+- `candle_depth_init` initializes the bridge. Set `use_metal = 1`; CPU execution
+  is unsupported and the call fails if Metal isn’t available.
 - `candle_depth_infer` consumes a `CandleDepthRequest`. The image view must
   describe an RGB or RGBA buffer with `len = width * height * channels`. Set
   `use_color_map` to a non-zero value to receive a coloured depth map; otherwise
