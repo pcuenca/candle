@@ -45,22 +45,22 @@ impl AssetLayout {
                 format!("asset directory {:?} does not exist", root),
             ));
         }
-        let dinov2_weights = root.join("dinov2_vits14.safetensors");
+        let dinov2_weights = root.join("dinov2_vits14.fp16.safetensors");
         if !dinov2_weights.exists() {
             return Err(set_error(
                 CandleDepthStatusCode::AssetDinov2Missing,
                 format!(
-                    "missing dinov2_vits14.safetensors under {:?}",
+                    "missing dinov2_vits14.fp16.safetensors under {:?}",
                     dinov2_weights
                 ),
             ));
         }
-        let depth_anything_weights = root.join("depth_anything_v2_vits.safetensors");
+        let depth_anything_weights = root.join("depth_anything_v2_vits.fp16.safetensors");
         if !depth_anything_weights.exists() {
             return Err(set_error(
                 CandleDepthStatusCode::AssetDepthModelMissing,
                 format!(
-                    "missing depth_anything_v2_vits.safetensors under {:?}",
+                    "missing depth_anything_v2_vits.fp16.safetensors under {:?}",
                     depth_anything_weights
                 ),
             ));
@@ -241,7 +241,7 @@ fn initialise(asset_dir: &PathBuf) -> Result<DepthBridge, CandleDepthStatusCode>
     })?;
 
     let dinov2_vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[layout.dinov2_weights.clone()], DType::F32, &device)
+        VarBuilder::from_mmaped_safetensors(&[layout.dinov2_weights.clone()], DType::F16, &device)
     }
     .map_err(|err| {
         set_error(
@@ -259,7 +259,7 @@ fn initialise(asset_dir: &PathBuf) -> Result<DepthBridge, CandleDepthStatusCode>
     let depth_vb = unsafe {
         VarBuilder::from_mmaped_safetensors(
             &[layout.depth_anything_weights.clone()],
-            DType::F32,
+            DType::F16,
             &device,
         )
     }
@@ -305,8 +305,8 @@ fn run_inference(
     let original_width = request.image.width as usize;
 
     let depth = context.model.0.forward(&input)?;
-    // Move to CPU for post-processing.
-    let depth = depth.to_device(&Device::Cpu)?;
+    // Move to CPU for post-processing and work in f32 for the CPU pipeline.
+    let depth = depth.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let colormap = SpectralRColormap::new();
     let output = post_process_image(
         &depth,
@@ -376,6 +376,7 @@ fn prepare_input(view: &CandleDepthImageView, device: &Device) -> anyhow::Result
         .broadcast_as(tensor.shape())?;
     let tensor = (tensor / max_pixel_val)?;
     let tensor = normalize_image(&tensor, &MAGIC_MEAN, &MAGIC_STD)?;
+    let tensor = tensor.to_dtype(DType::F16)?;
     Ok(tensor.to_device(device)?)
 }
 
