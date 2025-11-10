@@ -24,8 +24,13 @@ thread_local! {
 
 struct DepthBridge {
     device: Device,
-    layout: AssetLayout,
+    model: DepthModel,
 }
+
+struct DepthModel(DepthAnythingV2);
+
+unsafe impl Send for DepthModel {}
+unsafe impl Sync for DepthModel {}
 
 struct AssetLayout {
     dinov2_weights: PathBuf,
@@ -294,9 +299,10 @@ fn initialise(asset_dir: &PathBuf, use_metal: bool) -> Result<DepthBridge, Candl
         )
     })?;
 
-    drop(depth_anything);
-
-    Ok(DepthBridge { device, layout })
+    Ok(DepthBridge {
+        device,
+        model: DepthModel(depth_anything),
+    })
 }
 
 fn run_inference(
@@ -307,8 +313,7 @@ fn run_inference(
     let original_height = request.image.height as usize;
     let original_width = request.image.width as usize;
 
-    let model = load_depth_model(&context.layout, &context.device)?;
-    let depth = model.forward(&input)?;
+    let depth = context.model.0.forward(&input)?;
     // Move to CPU for post-processing.
     let depth = depth.to_device(&Device::Cpu)?;
     let colormap = SpectralRColormap::new();
@@ -320,30 +325,6 @@ fn run_inference(
         &colormap,
     )?;
     tensor_to_rgba(&output)
-}
-
-fn load_depth_model(layout: &AssetLayout, device: &Device) -> anyhow::Result<DepthAnythingV2> {
-    let dinov2_vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[layout.dinov2_weights.clone()], DType::F32, device)
-    }
-    .context("failed to load DINOv2 weights")?;
-    let dinov2 = dinov2::vit_small(dinov2_vb).context("failed to build DINOv2 model")?;
-
-    let depth_vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(
-            &[layout.depth_anything_weights.clone()],
-            DType::F32,
-            device,
-        )
-    }
-    .context("failed to load Depth Anything weights")?;
-    let model = DepthAnythingV2::new(
-        Arc::new(dinov2),
-        DepthAnythingV2Config::vit_small(),
-        depth_vb,
-    )
-    .context("failed to build Depth Anything model")?;
-    Ok(model)
 }
 
 fn prepare_input(view: &CandleDepthImageView, device: &Device) -> anyhow::Result<Tensor> {
