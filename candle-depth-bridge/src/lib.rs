@@ -32,6 +32,12 @@ struct DepthModel(DepthAnythingV2);
 unsafe impl Send for DepthModel {}
 unsafe impl Sync for DepthModel {}
 
+struct RenderedImage {
+    buffer: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
 struct AssetLayout {
     dinov2_weights: PathBuf,
     depth_anything_weights: PathBuf,
@@ -182,14 +188,14 @@ pub unsafe extern "C" fn candle_depth_infer(
     };
     let mut guard = context.lock().expect("mutex poisoned");
     match run_inference(&mut guard, request) {
-        Ok(output) => {
-            let mut output = output;
+        Ok(rendered) => {
+            let mut output = rendered.buffer;
             let image = CandleDepthImage {
                 data: output.as_mut_ptr(),
                 len: output.len(),
                 capacity: output.capacity(),
-                width: request.image.width,
-                height: request.image.height,
+                width: rendered.width,
+                height: rendered.height,
                 channels: 4,
             };
             std::mem::forget(output);
@@ -299,23 +305,23 @@ fn initialise(asset_dir: &PathBuf) -> Result<DepthBridge, CandleDepthStatusCode>
 fn run_inference(
     context: &mut DepthBridge,
     request: &CandleDepthRequest,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<RenderedImage> {
     let input = prepare_input(&request.image, &context.device)?;
-    let original_height = request.image.height as usize;
-    let original_width = request.image.width as usize;
 
     let depth = context.model.0.forward(&input)?;
     // Move to CPU for post-processing and work in f32 for the CPU pipeline.
     let depth = depth.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let colormap = SpectralRColormap::new();
-    let output = post_process_image(
-        &depth,
-        original_height,
-        original_width,
-        request.use_color_map != 0,
-        &colormap,
-    )?;
-    tensor_to_rgba(&output)
+    let output = post_process_image(&depth, request.use_color_map != 0, &colormap)?;
+    let (_, height, width) = output
+        .dims3()
+        .context("depth output should have shape (3, h, w)")?;
+    let buffer = tensor_to_rgba(&output)?;
+    Ok(RenderedImage {
+        buffer,
+        width: width as u32,
+        height: height as u32,
+    })
 }
 
 fn prepare_input(view: &CandleDepthImageView, device: &Device) -> anyhow::Result<Tensor> {
@@ -390,15 +396,10 @@ fn normalize_image(image: &Tensor, mean: &[f32; 3], std: &[f32; 3]) -> candle::R
 
 fn post_process_image(
     depth: &Tensor,
-    original_height: usize,
-    original_width: usize,
     use_color_map: bool,
     colormap: &SpectralRColormap,
 ) -> anyhow::Result<Tensor> {
-    // The output is actually 520x520 even if the input is 518x518
-    let out = depth.interpolate2d(original_height, original_width)?;
-    let out = scale_image(&out)?;
-    // let out = depth;
+    let out = scale_image(depth)?;
 
     let out = if use_color_map {
         colormap.gray_to_color(&out)?
