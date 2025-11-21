@@ -1,0 +1,16 @@
+language = "C"
+include_guard = "CANDLE_DEPTH_BRIDGE_H"
+autogen_warning = "// Generated with cbindgen."
+usize_is_size_t = true
+
+[parse]
+parse_deps = false
+
+[export]
+prefix = ""
+
+[fn]
+rename_args = "None"
+
+[defines]
+"target_os = ios" = "CANDLE_DEPTH_TARGET_IOS"

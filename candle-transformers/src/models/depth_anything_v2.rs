@@ -23,8 +23,6 @@ pub struct DepthAnythingV2Config {
     use_batch_norm: bool,
     use_class_token: bool,
     layer_ids_vits: Vec<usize>,
-    input_image_size: usize,
-    target_patch_size: usize,
 }
 
 impl DepthAnythingV2Config {
@@ -36,8 +34,6 @@ impl DepthAnythingV2Config {
         use_batch_norm: bool,
         use_class_token: bool,
         layer_ids_vits: Vec<usize>,
-        input_image_size: usize,
-        target_patch_size: usize,
     ) -> Self {
         Self {
             out_channel_sizes,
@@ -46,8 +42,6 @@ impl DepthAnythingV2Config {
             use_batch_norm,
             use_class_token,
             layer_ids_vits,
-            input_image_size,
-            target_patch_size,
         }
     }
 
@@ -59,8 +53,6 @@ impl DepthAnythingV2Config {
             use_batch_norm: false,
             use_class_token: false,
             layer_ids_vits: vec![2, 5, 8, 11],
-            input_image_size: 518,
-            target_patch_size: 518 / 14,
         }
     }
 
@@ -72,8 +64,6 @@ impl DepthAnythingV2Config {
             use_batch_norm: false,
             use_class_token: false,
             layer_ids_vits: vec![2, 5, 8, 11],
-            input_image_size: 518,
-            target_patch_size: 518 / 14,
         }
     }
 
@@ -85,8 +75,6 @@ impl DepthAnythingV2Config {
             use_batch_norm: false,
             use_class_token: false,
             layer_ids_vits: vec![4, 11, 17, 23],
-            input_image_size: 518,
-            target_patch_size: 518 / 14,
         }
     }
 
@@ -98,8 +86,6 @@ impl DepthAnythingV2Config {
             use_batch_norm: false,
             use_class_token: false,
             layer_ids_vits: vec![9, 19, 29, 39],
-            input_image_size: 518,
-            target_patch_size: 518 / 14,
         }
     }
 }
@@ -193,13 +179,13 @@ pub struct FeatureFusionBlock {
     res_conv_unit1: ResidualConvUnit,
     res_conv_unit2: ResidualConvUnit,
     output_conv: Conv2d,
-    target_patch_size: usize,
+    scale_factor: usize,
 }
 
 impl FeatureFusionBlock {
     pub fn new(
         conf: &DepthAnythingV2Config,
-        target_patch_size: usize,
+        scale_factor: usize,
         activation: Activation,
         vb: VarBuilder,
     ) -> Result<Self> {
@@ -225,17 +211,30 @@ impl FeatureFusionBlock {
             res_conv_unit1,
             res_conv_unit2,
             output_conv,
-            target_patch_size,
+            scale_factor,
         })
     }
 }
 
-impl Module for FeatureFusionBlock {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+impl FeatureFusionBlock {
+    fn target_dims(&self, patch_height: usize, patch_width: usize) -> (usize, usize) {
+        (
+            patch_height * self.scale_factor,
+            patch_width * self.scale_factor,
+        )
+    }
+
+    fn forward_with_shape(&self, xs: &Tensor, target_h: usize, target_w: usize) -> Result<Tensor> {
         let out = self.res_conv_unit2.forward(xs)?;
-        let out = out.interpolate2d(self.target_patch_size, self.target_patch_size)?;
+        let out = out.interpolate2d(target_h, target_w)?;
 
         self.output_conv.forward(&out)
+    }
+}
+
+impl Module for FeatureFusionBlock {
+    fn forward(&self, _xs: &Tensor) -> Result<Tensor> {
+        candle::bail!("use `forward_with_shape` with explicit spatial targets")
     }
 }
 
@@ -292,30 +291,10 @@ impl Scratch {
             vb.pp("layer4_rn"),
         )?;
 
-        let refine_net1 = FeatureFusionBlock::new(
-            conf,
-            conf.target_patch_size * 8,
-            Activation::Relu,
-            vb.pp("refinenet1"),
-        )?;
-        let refine_net2 = FeatureFusionBlock::new(
-            conf,
-            conf.target_patch_size * 4,
-            Activation::Relu,
-            vb.pp("refinenet2"),
-        )?;
-        let refine_net3 = FeatureFusionBlock::new(
-            conf,
-            conf.target_patch_size * 2,
-            Activation::Relu,
-            vb.pp("refinenet3"),
-        )?;
-        let refine_net4 = FeatureFusionBlock::new(
-            conf,
-            conf.target_patch_size,
-            Activation::Relu,
-            vb.pp("refinenet4"),
-        )?;
+        let refine_net1 = FeatureFusionBlock::new(conf, 8, Activation::Relu, vb.pp("refinenet1"))?;
+        let refine_net2 = FeatureFusionBlock::new(conf, 4, Activation::Relu, vb.pp("refinenet2"))?;
+        let refine_net3 = FeatureFusionBlock::new(conf, 2, Activation::Relu, vb.pp("refinenet3"))?;
+        let refine_net4 = FeatureFusionBlock::new(conf, 1, Activation::Relu, vb.pp("refinenet4"))?;
 
         let conv_cfg = Conv2dConfig {
             padding: 1,
@@ -377,8 +356,6 @@ pub struct DPTHead {
     readout_projections: Vec<Sequential>,
     scratch: Scratch,
     use_class_token: bool,
-    input_image_size: usize,
-    target_patch_size: usize,
 }
 
 impl DPTHead {
@@ -459,14 +436,19 @@ impl DPTHead {
             readout_projections,
             scratch,
             use_class_token: conf.use_class_token,
-            input_image_size: conf.input_image_size,
-            target_patch_size: conf.target_patch_size,
         })
     }
 }
 
-impl Module for DPTHead {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+impl DPTHead {
+    fn forward_with_shapes(
+        &self,
+        xs: &Tensor,
+        patch_height: usize,
+        patch_width: usize,
+        input_height: usize,
+        input_width: usize,
+    ) -> Result<Tensor> {
         let mut out: Vec<Tensor> = Vec::with_capacity(NUM_CHANNELS);
         for i in 0..NUM_CHANNELS {
             let x = if self.use_class_token {
@@ -484,8 +466,8 @@ impl Module for DPTHead {
             let x = x.permute((0, 2, 1))?.reshape((
                 x_dims[0],
                 x_dims[x_dims.len() - 1],
-                self.target_patch_size,
-                self.target_patch_size,
+                patch_height,
+                patch_width,
             ))?;
             let x = self.projections[i].forward(&x)?;
 
@@ -498,7 +480,14 @@ impl Module for DPTHead {
         let layer_3_rn = self.scratch.layer3_rn.forward(&out[2])?;
         let layer_4_rn = self.scratch.layer4_rn.forward(&out[3])?;
 
-        let path4 = self.scratch.refine_net4.forward(&layer_4_rn)?;
+        let (target_h4, target_w4) = self
+            .scratch
+            .refine_net4
+            .target_dims(patch_height, patch_width);
+        let path4 =
+            self.scratch
+                .refine_net4
+                .forward_with_shape(&layer_4_rn, target_h4, target_w4)?;
 
         let res3_out = self
             .scratch
@@ -506,7 +495,14 @@ impl Module for DPTHead {
             .res_conv_unit1
             .forward(&layer_3_rn)?;
         let res3_out = path4.add(&res3_out)?;
-        let path3 = self.scratch.refine_net3.forward(&res3_out)?;
+        let (target_h3, target_w3) = self
+            .scratch
+            .refine_net3
+            .target_dims(patch_height, patch_width);
+        let path3 = self
+            .scratch
+            .refine_net3
+            .forward_with_shape(&res3_out, target_h3, target_w3)?;
 
         let res2_out = self
             .scratch
@@ -514,7 +510,14 @@ impl Module for DPTHead {
             .res_conv_unit1
             .forward(&layer_2_rn)?;
         let res2_out = path3.add(&res2_out)?;
-        let path2 = self.scratch.refine_net2.forward(&res2_out)?;
+        let (target_h2, target_w2) = self
+            .scratch
+            .refine_net2
+            .target_dims(patch_height, patch_width);
+        let path2 = self
+            .scratch
+            .refine_net2
+            .forward_with_shape(&res2_out, target_h2, target_w2)?;
 
         let res1_out = self
             .scratch
@@ -522,13 +525,26 @@ impl Module for DPTHead {
             .res_conv_unit1
             .forward(&layer_1_rn)?;
         let res1_out = path2.add(&res1_out)?;
-        let path1 = self.scratch.refine_net1.forward(&res1_out)?;
+        let (target_h1, target_w1) = self
+            .scratch
+            .refine_net1
+            .target_dims(patch_height, patch_width);
+        let path1 = self
+            .scratch
+            .refine_net1
+            .forward_with_shape(&res1_out, target_h1, target_w1)?;
 
         let out = self.scratch.output_conv1.forward(&path1)?;
 
-        let out = out.interpolate2d(self.input_image_size, self.input_image_size)?;
+        let out = out.interpolate2d(input_height, input_width)?;
 
         self.scratch.output_conv2.forward(&out)
+    }
+}
+
+impl Module for DPTHead {
+    fn forward(&self, _xs: &Tensor) -> Result<Tensor> {
+        candle::bail!("use `forward_with_shapes` with explicit patch/input sizes")
     }
 }
 
@@ -556,6 +572,16 @@ impl DepthAnythingV2 {
 
 impl Module for DepthAnythingV2 {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (_batch, _channels, input_height, input_width) = xs.dims4()?;
+        let (patch_size_h, patch_size_w) = self.pretrained.patch_size();
+        if input_height % patch_size_h != 0 || input_width % patch_size_w != 0 {
+            candle::bail!(
+                "input dimensions ({input_height}, {input_width}) must be multiples of the patch size ({patch_size_h}, {patch_size_w})"
+            );
+        }
+        let patch_height = input_height / patch_size_h;
+        let patch_width = input_width / patch_size_w;
+
         let features = self.pretrained.get_intermediate_layers(
             xs,
             &self.conf.layer_ids_vits,
@@ -563,7 +589,13 @@ impl Module for DepthAnythingV2 {
             false,
             true,
         )?;
-        let depth = self.depth_head.forward(&features)?;
+        let depth = self.depth_head.forward_with_shapes(
+            &features,
+            patch_height,
+            patch_width,
+            input_height,
+            input_width,
+        )?;
 
         depth.relu()
     }

@@ -375,6 +375,10 @@ impl DinoVisionTransformer {
 
         Tensor::stack(&outputs[..], 0)
     }
+
+    pub fn patch_size(&self) -> (usize, usize) {
+        self.patch_embed.patch_size
+    }
 }
 
 impl Module for DinoVisionTransformer {

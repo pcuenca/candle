@@ -1,0 +1,30 @@
+[package]
+name = "candle-depth-bridge"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+anyhow = { workspace = true }
+candle = { workspace = true }
+candle-nn = { workspace = true }
+candle-transformers = { workspace = true }
+enterpolation = "0.2.1"
+image = { workspace = true }
+libc = "0.2"
+palette = { version = "0.7.6", features = ["named"] }
+
+[features]
+default = ["metal"]
+metal = [
+    "candle/metal",
+    "candle-nn/metal",
+    "candle-transformers/metal",
+]
