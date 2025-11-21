@@ -61,20 +61,20 @@ pub fn load_image<P: AsRef<std::path::Path>>(
 
 pub fn load_image_and_resize<P: AsRef<std::path::Path>>(
     p: P,
-    width: usize,
     height: usize,
+    width: usize,
 ) -> Result<Tensor> {
     let img = image::ImageReader::open(p)?
         .decode()
         .map_err(candle::Error::wrap)?
-        .resize_to_fill(
+        .resize_exact(
             width as u32,
             height as u32,
             image::imageops::FilterType::Triangle,
         );
     let img = img.to_rgb8();
     let data = img.into_raw();
-    Tensor::from_vec(data, (width, height, 3), &Device::Cpu)?.permute((2, 0, 1))
+    Tensor::from_vec(data, (height, width, 3), &Device::Cpu)?.permute((2, 0, 1))
 }
 
 /// Saves an image to disk using the image crate, this expects an input with shape

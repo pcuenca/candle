@@ -25,6 +25,7 @@ const MAGIC_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const MAGIC_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 const DINO_IMG_SIZE: usize = 518;
+const VIT_PATCH_SIZE: usize = 14;
 
 #[derive(Parser)]
 struct Args {
@@ -117,8 +118,14 @@ fn load_and_prep_image(
     device: &Device,
 ) -> anyhow::Result<(usize, usize, Tensor)> {
     let (_original_image, original_height, original_width) = load_image(&image_path, None)?;
+    let (resized_height, resized_width) = target_image_dimensions(
+        original_height,
+        original_width,
+        DINO_IMG_SIZE,
+        VIT_PATCH_SIZE,
+    );
 
-    let image = load_image_and_resize(&image_path, DINO_IMG_SIZE, DINO_IMG_SIZE)?
+    let image = load_image_and_resize(&image_path, resized_height, resized_width)?
         .unsqueeze(0)?
         .to_dtype(F32)?
         .to_device(&device)?;
@@ -182,4 +189,39 @@ fn scale_image(depth: &Tensor) -> Result<Tensor> {
         .broadcast_as(depth.shape())?;
 
     depth / range_tensor
+}
+
+fn target_image_dimensions(
+    original_height: usize,
+    original_width: usize,
+    max_long_side: usize,
+    patch_multiple: usize,
+) -> (usize, usize) {
+    if original_height == 0 || original_width == 0 {
+        return (patch_multiple, patch_multiple);
+    }
+    let max_dim = original_height.max(original_width) as f32;
+    let scale = (max_long_side as f32 / max_dim).max(1e-6);
+    let scaled_height = ((original_height as f32) * scale).round().max(1.0) as usize;
+    let scaled_width = ((original_width as f32) * scale).round().max(1.0) as usize;
+    (
+        snap_to_multiple(scaled_height.max(patch_multiple), patch_multiple),
+        snap_to_multiple(scaled_width.max(patch_multiple), patch_multiple),
+    )
+}
+
+fn snap_to_multiple(value: usize, multiple: usize) -> usize {
+    if multiple == 0 {
+        return value;
+    }
+    if value % multiple == 0 {
+        return value;
+    }
+    let lower = value - (value % multiple);
+    let upper = lower + multiple;
+    if lower >= multiple && value - lower <= upper - value {
+        lower
+    } else {
+        upper
+    }
 }

@@ -12,6 +12,7 @@ use candle_transformers::models::dinov2;
 use enterpolation::Generator;
 
 const DINO_IMG_SIZE: usize = 518;
+const VIT_PATCH_SIZE: usize = 14;
 const MAGIC_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const MAGIC_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -311,8 +312,7 @@ fn run_inference(
     let depth = context.model.0.forward(&input)?;
     // Move to CPU for post-processing and work in f32 for the CPU pipeline.
     let depth = depth.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-    let colormap = SpectralRColormap::new();
-    let output = post_process_image(&depth, request.use_color_map != 0, &colormap)?;
+    let output = post_process_image(&depth)?;
     let (_, height, width) = output
         .dims3()
         .context("depth output should have shape (3, h, w)")?;
@@ -364,15 +364,18 @@ fn prepare_input(view: &CandleDepthImageView, device: &Device) -> anyhow::Result
         image::DynamicImage::ImageRgb8(buffer)
     };
 
-    let resized = dyn_img.resize_to_fill(
-        DINO_IMG_SIZE as u32,
-        DINO_IMG_SIZE as u32,
-        image::imageops::FilterType::Triangle,
+    let (target_height, target_width) =
+        target_image_dimensions(height, width, DINO_IMG_SIZE, VIT_PATCH_SIZE);
+    let resized = dyn_img.resize_exact(
+        target_width as u32,
+        target_height as u32,
+        // image::imageops::FilterType::Triangle,
+        image::imageops::FilterType::Nearest,
     );
     let rgb = resized.to_rgb8();
     let data = rgb.into_raw();
 
-    let tensor = Tensor::from_vec(data, (DINO_IMG_SIZE, DINO_IMG_SIZE, 3), &Device::Cpu)?
+    let tensor = Tensor::from_vec(data, (target_height, target_width, 3), &Device::Cpu)?
         .permute((2, 0, 1))?
         .unsqueeze(0)?
         .to_dtype(DType::F32)?;
@@ -394,19 +397,11 @@ fn normalize_image(image: &Tensor, mean: &[f32; 3], std: &[f32; 3]) -> candle::R
     image.sub(&mean_tensor)?.div(&std_tensor)
 }
 
-fn post_process_image(
-    depth: &Tensor,
-    use_color_map: bool,
-    colormap: &SpectralRColormap,
-) -> anyhow::Result<Tensor> {
+fn post_process_image(depth: &Tensor) -> anyhow::Result<Tensor> {
     let out = scale_image(depth)?;
 
-    let out = if use_color_map {
-        colormap.gray_to_color(&out)?
-    } else {
-        let slices = [&out, &out, &out];
-        Tensor::cat(&slices, 0)?
-    };
+    let slices = [&out, &out, &out];
+    let out = Tensor::cat(&slices, 0)?;
 
     let max_pixel_val = Tensor::try_from(255.0f32)?
         .to_device(out.device())?
@@ -481,6 +476,41 @@ fn c_string_to_string(ptr: *const c_char) -> Result<String, CandleDepthStatusCod
         }
     };
     Ok(str_slice.to_string())
+}
+
+fn target_image_dimensions(
+    original_height: usize,
+    original_width: usize,
+    max_long_side: usize,
+    patch_multiple: usize,
+) -> (usize, usize) {
+    if original_height == 0 || original_width == 0 {
+        return (patch_multiple, patch_multiple);
+    }
+    let max_dim = original_height.max(original_width) as f32;
+    let scale = (max_long_side as f32 / max_dim).max(1e-6);
+    let scaled_height = ((original_height as f32) * scale).round().max(1.0) as usize;
+    let scaled_width = ((original_width as f32) * scale).round().max(1.0) as usize;
+    (
+        snap_to_multiple(scaled_height.max(patch_multiple), patch_multiple),
+        snap_to_multiple(scaled_width.max(patch_multiple), patch_multiple),
+    )
+}
+
+fn snap_to_multiple(value: usize, multiple: usize) -> usize {
+    if multiple == 0 {
+        return value;
+    }
+    if value % multiple == 0 {
+        return value;
+    }
+    let lower = value - (value % multiple);
+    let upper = lower + multiple;
+    if lower >= multiple && value - lower <= upper - value {
+        lower
+    } else {
+        upper
+    }
 }
 
 fn set_error(
