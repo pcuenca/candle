@@ -1,0 +1,4 @@
+module CandleSD15Bridge [system] {
+  header "candle_sd15_bridge.h"
+  export *
+}

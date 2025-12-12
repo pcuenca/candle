@@ -33,7 +33,11 @@ impl Buffer {
     }
 
     pub fn did_modify_range(&self, range: NSRange) {
-        self.as_ref().didModifyRange(range);
+        use objc2_metal::MTLResource as _;
+        let options = self.as_ref().resourceOptions();
+        if options.contains(MTLResourceOptions::StorageModeManaged) {
+            self.as_ref().didModifyRange(range);
+        }
     }
 }
 
